@@ -1,0 +1,142 @@
+service: daily-encryption
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-west-2
+  stage: ${opt:stage, 'dev'}
+  environment:
+    KEY_BUCKET: daily-encryption-key-bucket-${self:provider.stage}
+    SOURCE_BUCKET: daily-encryption-source-bucket-${self:provider.stage}
+    STATE_MACHINE_ARN:
+      Fn::Sub: arn:aws:states:${self:provider.region}:${AWS::AccountId}:stateMachine:DailyEncryptionProcessStateMachine
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - "s3:*"
+        - "states:*"
+      Resource: "*"
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  createKey:
+    handler: createKey.handler
+    environment:
+      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
+
+  listFiles:
+    handler: listFiles.handler
+    environment:
+      SOURCE_BUCKET: ${self:provider.environment.SOURCE_BUCKET}
+
+  proccessFiles:
+    handler: proccessFiles.handler
+    environment:
+      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
+      SOURCE_BUCKET: ${self:provider.environment.SOURCE_BUCKET}
+
+  getKeys:
+    handler: getKeys.handler
+    environment:
+      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
+    events:
+      - http:
+          path: keys
+          method: get
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    dailyEncryptionProcess:
+      name: DailyEncryptionProcessStateMachine
+      definition:
+        Comment: "Daily encryption process"
+        StartAt: "CreateKey"
+        States:
+          CreateKey:
+            Type: "Task"
+            Resource: !GetAtt CreateKeyLambdaFunction.Arn
+            ResultPath: "$.keyInfo"
+            Next: "ListFiles"
+          ListFiles:
+            Type: "Task"
+            Resource: !GetAtt ListFilesLambdaFunction.Arn
+            ResultPath: "$.files"
+            Parameters:
+              "date.$": "$.keyInfo.date"
+            Next: "ProcessBatches"
+          ProcessBatches:
+            Type: "Map"
+            ItemsPath: "$.files.batches"
+            MaxConcurrency: 1
+            Parameters:
+              "batch.$": "$$.Map.Item.Value"
+              "date.$": "$.files.date"
+            Iterator:
+              StartAt: "ProccessFiles"
+              States:
+                ProccessFiles:
+                  Type: "Task"
+                  Resource: !GetAtt ProccessFilesLambdaFunction.Arn
+                  End: true
+            End: true
+
+resources:
+  Resources:
+    KeyBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.KEY_BUCKET}
+
+    SourceBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.SOURCE_BUCKET}
+
+    StartStateMachineSchedule:
+      Type: AWS::Events::Rule
+      Properties:
+        ScheduleExpression: cron(0 9 * * ? *)
+        State: ENABLED
+        Targets:
+          - Arn:
+              Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${self:stepFunctions.stateMachines.dailyEncryptionProcess.name}"
+            Id: "StartDailyEncryptionProcessStateMachine"
+            RoleArn:
+              Fn::GetAtt:
+                - StartStateMachineExecutionRole
+                - Arn
+
+    StartStateMachineExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "events.amazonaws.com"
+              Action: "sts:AssumeRole"
+        Policies:
+          - PolicyName: "StartStateMachineExecutionPolicy"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "states:StartExecution"
+                  Resource:
+                    - Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${self:stepFunctions.stateMachines.dailyEncryptionProcess.name}"
+
+outputs:
+  KeyBucketName:
+    Value: !Ref KeyBucket
+  SourceBucketName:
+    Value: !Ref SourceBucket
+  DailyEncryptionProcessStateMachineArn:
+    Value:
+      Ref: DailyEncryptionProcessStateMachine
+    Export:
+      Name: ${self:provider.stage}-DailyEncryptionProcessStateMachineArn
