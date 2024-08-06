@@ -1,11 +1,13 @@
 const AWS = require("aws-sdk");
 const s3 = new AWS.S3();
+const kms = new AWS.KMS();
+const dynamoDB = new AWS.DynamoDB.DocumentClient();
 const crypto = require("crypto");
 
 const decryptData = (data, key) => {
   const decipher = crypto.createDecipheriv(
     "aes-256-cbc",
-    Buffer.from(key, "base64"),
+    key,
     Buffer.alloc(16, 0)
   );
   let decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
@@ -13,35 +15,24 @@ const decryptData = (data, key) => {
 };
 
 const encryptData = (data, key) => {
-  const cipher = crypto.createCipheriv(
-    "aes-256-cbc",
-    Buffer.from(key, "base64"),
-    Buffer.alloc(16, 0)
-  );
+  const cipher = crypto.createCipheriv("aes-256-cbc", key, Buffer.alloc(16, 0));
   let encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
   return encrypted;
 };
 
-const loadKey = async (date, bucketName) => {
-  try {
-    const keyObject = await s3
-      .getObject({
-        Bucket: bucketName,
-        Key: `keys/${date}.json`,
-      })
-      .promise();
-    const keyInfo = JSON.parse(keyObject.Body.toString());
-    return keyInfo.encryption_key;
-  } catch (error) {
-    if (error.code === "NoSuchKey") {
-      return null;
-    }
-    throw error;
-  }
+const loadKey = async (date, tableName) => {
+  const result = await dynamoDB
+    .get({
+      TableName: tableName,
+      Key: { date: date },
+    })
+    .promise();
+
+  return result.Item ? result.Item.ciphertext_blob : null;
 };
 
 exports.handler = async (event) => {
-  const bucketName = process.env.KEY_BUCKET;
+  const tableName = process.env.KEY_TABLE;
   const sourceBucketName = process.env.SOURCE_BUCKET;
   const currentDate = event.date;
 
@@ -50,8 +41,24 @@ exports.handler = async (event) => {
   )
     .toISOString()
     .split("T")[0];
-  const previousKey = await loadKey(previousDate, bucketName);
-  const currentKey = await loadKey(currentDate, bucketName);
+  const previousCiphertextBlob = await loadKey(previousDate, tableName);
+  const currentCiphertextBlob = await loadKey(currentDate, tableName);
+
+  const previousPlaintextKey = previousCiphertextBlob
+    ? (
+        await kms
+          .decrypt({
+            CiphertextBlob: Buffer.from(previousCiphertextBlob, "base64"),
+          })
+          .promise()
+      ).Plaintext
+    : null;
+
+  const currentPlaintextKey = (
+    await kms
+      .decrypt({ CiphertextBlob: Buffer.from(currentCiphertextBlob, "base64") })
+      .promise()
+  ).Plaintext;
 
   for (const fileKey of event.batch) {
     const fileObject = await s3
@@ -62,19 +69,19 @@ exports.handler = async (event) => {
       .promise();
 
     let decryptedData;
-    if (previousKey) {
-      decryptedData = decryptData(fileObject.Body, previousKey);
+    if (previousPlaintextKey) {
+      decryptedData = decryptData(fileObject.Body, previousPlaintextKey);
     } else {
       decryptedData = fileObject.Body;
     }
 
-    const reencryptedData = encryptData(decryptedData, currentKey);
+    const encryptedData = encryptData(decryptedData, currentPlaintextKey);
 
     await s3
       .putObject({
         Bucket: sourceBucketName,
         Key: fileKey,
-        Body: reencryptedData,
+        Body: encryptedData,
       })
       .promise();
   }

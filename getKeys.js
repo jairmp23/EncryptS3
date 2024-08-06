@@ -1,29 +1,38 @@
-const AWS = require('aws-sdk');
-const s3 = new AWS.S3();
+const AWS = require("aws-sdk");
+const dynamoDB = new AWS.DynamoDB.DocumentClient();
+const kms = new AWS.KMS();
 
 exports.handler = async (event) => {
-  const bucketName = process.env.KEY_BUCKET;
+  const currentDate = new Date().toISOString().split("T")[0];
+  const tableName = process.env.KEY_TABLE;
 
-  const currentDate = new Date().toISOString().split('T')[0];
-  const keyName = `keys/${currentDate}.json`;
+  const result = await dynamoDB
+    .get({
+      TableName: tableName,
+      Key: { date: currentDate },
+    })
+    .promise();
 
-  try {
-    const keyObject = await s3.getObject({
-      Bucket: bucketName,
-      Key: keyName
-    }).promise();
-
-    const keyInfo = JSON.parse(keyObject.Body.toString());
-
+  if (!result.Item) {
     return {
-      statusCode: 200,
-      body: JSON.stringify(keyInfo)
-    };
-  } catch (error) {
-    console.error('Error getting the key:', error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'Error getting the key' })
+      statusCode: 404,
+      body: JSON.stringify({ error: "Key not found" }),
     };
   }
+
+  const ciphertextBlob = result.Item.ciphertext_blob;
+
+  // Descifrar la clave de datos utilizando KMS
+  const decryptedKey = await kms
+    .decrypt({
+      CiphertextBlob: Buffer.from(ciphertextBlob, "base64"),
+    })
+    .promise();
+
+  const plaintextKey = decryptedKey.Plaintext.toString("base64");
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({ encryption_key: plaintextKey }),
+  };
 };
