@@ -1,26 +1,27 @@
 const AWS = require("aws-sdk");
-const s3 = new AWS.S3();
-const crypto = require("crypto");
+const kms = new AWS.KMS();
+const dynamoDB = new AWS.DynamoDB.DocumentClient();
 
 exports.handler = async (event) => {
   const currentDate = new Date().toISOString().split("T")[0];
+  const tableName = process.env.KEY_TABLE;
 
-  // Generar una clave de encriptación AES-256
-  const encryptionKey = crypto.randomBytes(32).toString("base64");
+  const keyData = await kms
+    .generateDataKey({
+      KeyId: process.env.KMS_KEY_ID,
+      KeySpec: "AES_256",
+    })
+    .promise();
 
   const keyInfo = {
     date: currentDate,
-    encryption_key: encryptionKey,
+    ciphertext_blob: keyData.CiphertextBlob.toString("base64"),
   };
 
-  const bucketName = process.env.KEY_BUCKET;
-  const keyName = `keys/${currentDate}.json`;
-
-  await s3
-    .putObject({
-      Bucket: bucketName,
-      Key: keyName,
-      Body: JSON.stringify(keyInfo),
+  await dynamoDB
+    .put({
+      TableName: tableName,
+      Item: keyInfo,
     })
     .promise();
 

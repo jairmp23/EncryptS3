@@ -2,18 +2,21 @@ service: daily-encryption
 
 provider:
   name: aws
-  runtime: nodejs18.x
+  runtime: nodejs16.x
   region: us-west-2
   stage: ${opt:stage, 'dev'}
   environment:
-    KEY_BUCKET: daily-encryption-key-bucket-${self:provider.stage}
     SOURCE_BUCKET: daily-encryption-source-bucket-${self:provider.stage}
+    KMS_KEY_ID: arn:aws:kms:${self:provider.region}:${aws:accountId}:key/<your-kms-key-id> # Reemplaza con tu propio ARN de la clave KMS
+    KEY_TABLE: daily-encryption-key-table-${self:provider.stage}
     STATE_MACHINE_ARN:
       Fn::Sub: arn:aws:states:${self:provider.region}:${AWS::AccountId}:stateMachine:DailyEncryptionProcessStateMachine
   iamRoleStatements:
     - Effect: "Allow"
       Action:
         - "s3:*"
+        - "kms:*"
+        - "dynamodb:*"
         - "states:*"
       Resource: "*"
 
@@ -24,7 +27,8 @@ functions:
   createKey:
     handler: createKey.handler
     environment:
-      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
+      KMS_KEY_ID: ${self:provider.environment.KMS_KEY_ID}
+      KEY_TABLE: ${self:provider.environment.KEY_TABLE}
 
   listFiles:
     handler: listFiles.handler
@@ -34,13 +38,15 @@ functions:
   proccessFiles:
     handler: proccessFiles.handler
     environment:
-      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
       SOURCE_BUCKET: ${self:provider.environment.SOURCE_BUCKET}
+      KMS_KEY_ID: ${self:provider.environment.KMS_KEY_ID}
+      KEY_TABLE: ${self:provider.environment.KEY_TABLE}
 
   getKeys:
     handler: getKeys.handler
     environment:
-      KEY_BUCKET: ${self:provider.environment.KEY_BUCKET}
+      KEY_TABLE: ${self:provider.environment.KEY_TABLE}
+      KMS_KEY_ID: ${self:provider.environment.KMS_KEY_ID}
     events:
       - http:
           path: keys
@@ -85,20 +91,27 @@ stepFunctions:
 
 resources:
   Resources:
-    KeyBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:provider.environment.KEY_BUCKET}
-
     SourceBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:provider.environment.SOURCE_BUCKET}
 
+    KeyTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.KEY_TABLE}
+        AttributeDefinitions:
+          - AttributeName: date
+            AttributeType: S
+        KeySchema:
+          - AttributeName: date
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
     StartStateMachineSchedule:
       Type: AWS::Events::Rule
       Properties:
-        ScheduleExpression: cron(0 9 * * ? *)
+        ScheduleExpression: cron(9 3 * * ? *)
         State: ENABLED
         Targets:
           - Arn:
@@ -131,10 +144,10 @@ resources:
                     - Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${self:stepFunctions.stateMachines.dailyEncryptionProcess.name}"
 
 outputs:
-  KeyBucketName:
-    Value: !Ref KeyBucket
   SourceBucketName:
     Value: !Ref SourceBucket
+  KeyTableName:
+    Value: !Ref KeyTable
   DailyEncryptionProcessStateMachineArn:
     Value:
       Ref: DailyEncryptionProcessStateMachine
