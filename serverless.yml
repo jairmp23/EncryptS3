@@ -7,7 +7,7 @@ provider:
   stage: ${opt:stage, 'dev'}
   environment:
     SOURCE_BUCKET: daily-encryption-source-bucket-${self:provider.stage}
-    KMS_KEY_ID: arn:aws:kms:${self:provider.region}:${aws:accountId}:key/<your-kms-key-id> # Reemplaza con tu propio ARN de la clave KMS
+    KMS_KEY_ID: arn:aws:kms:${self:provider.region}:${aws:accountId}:key/<your-kms-key-id>
     KEY_TABLE: daily-encryption-key-table-${self:provider.stage}
     STATE_MACHINE_ARN:
       Fn::Sub: arn:aws:states:${self:provider.region}:${AWS::AccountId}:stateMachine:DailyEncryptionProcessStateMachine
@@ -22,6 +22,10 @@ provider:
 
 plugins:
   - serverless-step-functions
+
+package:
+  exclude:
+    - node_modules/**
 
 functions:
   createKey:
